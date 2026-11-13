@@ -7,27 +7,39 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.random.Random
 
-/** Desert world: dunes (height field), villages, palms, rocks + collision data. */
+/**
+ * Desert world: dunes (height field), villages of multi-story enterable buildings,
+ * palms, rocks, plus collision data (solids, walkable surfaces, circles).
+ */
 class World {
-    class Box(val x0: Float, val x1: Float, val z0: Float, val z1: Float)
+    /** 3D collision box. Blocks horizontal movement depending on the player's feet height. */
+    class Solid(val x0: Float, val x1: Float, val z0: Float, val z1: Float, val yb: Float, val yt: Float)
+
+    /** Walkable top surface (floors, roofs, stair steps). */
+    class Surf(val x0: Float, val x1: Float, val z0: Float, val z1: Float, val top: Float)
+
+    class Building(val x0: Float, val x1: Float, val z0: Float, val z1: Float) {
+        val solids = ArrayList<Solid>()
+        val surfs = ArrayList<Surf>()
+    }
+
     class Circle(val x: Float, val z: Float, val r: Float)
-    private class House(
-        val cx: Float, val cz: Float,
-        val w: Float, val d: Float, val h: Float,
-        val tone: Float
-    )
 
     companion object {
         const val HALF = 200f
+        const val FH = 3.5f          // floor height
+        const val STEP_UP = 0.5f     // max step the player can climb
+        const val PLAYER_H = 1.7f
     }
 
-    val boxes = ArrayList<Box>()
+    val buildings = ArrayList<Building>()
     val circles = ArrayList<Circle>()
-    private val houses = ArrayList<House>()
+    private val spots = ArrayList<FloatArray>()   // building centers: cx, cz
     private val bumps = ArrayList<FloatArray>()   // x, z, radius, height
     private val palms = ArrayList<FloatArray>()   // x, z
     private val rocks = ArrayList<FloatArray>()   // x, z, size
     private val rnd = Random(2024)
+    private val mesh = MeshBuilder()
 
     private fun rf(a: Float, b: Float) = a + (b - a) * rnd.nextFloat()
 
@@ -46,39 +58,47 @@ class World {
         var tries = 0
         while (centers.size < 6 && tries < 500) {
             tries++
-            val x = rf(-150f, 150f)
-            val z = rf(-150f, 150f)
-            if (hypot(x, z) < 45f) continue
-            if (centers.any { hypot(it[0] - x, it[1] - z) < 70f }) continue
+            val x = rf(-140f, 140f)
+            val z = rf(-140f, 140f)
+            if (hypot(x, z) < 50f) continue
+            if (centers.any { hypot(it[0] - x, it[1] - z) < 80f }) continue
             centers.add(floatArrayOf(x, z))
         }
         for (c in centers) {
             val count = 5 + rnd.nextInt(4)
             var placed = 0
             var t = 0
-            while (placed < count && t < 100) {
+            while (placed < count && t < 150) {
                 t++
                 val ang = rf(0f, 6.2831f)
-                val dist = rf(6f, 28f)
+                val dist = rf(8f, 36f)
                 val hx = c[0] + cos(ang) * dist
                 val hz = c[1] + sin(ang) * dist
-                val w = rf(7f, 11f)
-                val d = rf(6f, 9f)
-                if (houses.any { hypot(it.cx - hx, it.cz - hz) < 15f }) continue
-                houses.add(House(hx, hz, w, d, rf(3.5f, 4.5f), rf(0f, 1f)))
-                boxes.add(Box(hx - w / 2, hx + w / 2, hz - d / 2, hz + d / 2))
+                if (spots.any { hypot(it[0] - hx, it[1] - hz) < 19f }) continue
+                val w = rf(9f, 13f)
+                val d = rf(9.5f, 12.5f)
+                val r = rnd.nextFloat()
+                val floors = when {
+                    r < 0.15f -> 1
+                    r < 0.45f -> 2
+                    r < 0.75f -> 3
+                    r < 0.90f -> 4
+                    else -> 5
+                }
+                spots.add(floatArrayOf(hx, hz))
+                addBuilding(hx, hz, w, d, floors, rf(0f, 1f))
                 placed++
             }
             for (k in 0 until 8) {
                 val ang = rf(0f, 6.2831f)
-                val dist = rf(8f, 36f)
+                val dist = rf(12f, 42f)
                 val px = c[0] + cos(ang) * dist
                 val pz = c[1] + sin(ang) * dist
-                if (houses.none { hypot(it.cx - px, it.cz - pz) < 9f }) addPalm(px, pz)
+                if (spots.none { hypot(it[0] - px, it[1] - pz) < 13f }) addPalm(px, pz)
             }
         }
 
-        // ---- dunes (kept away from houses so village ground stays flat) ----
+        // ---- dunes (kept away from buildings so village ground stays flat) ----
         var made = 0
         tries = 0
         while (made < 40 && tries < 400) {
@@ -86,7 +106,7 @@ class World {
             val r = rf(20f, 45f)
             val x = rf(-190f, 190f)
             val z = rf(-190f, 190f)
-            if (houses.any { hypot(it.cx - x, it.cz - z) < r + 10f }) continue
+            if (spots.any { hypot(it[0] - x, it[1] - z) < r + 12f }) continue
             bumps.add(floatArrayOf(x, z, r, rf(2f, 7f)))
             made++
         }
@@ -98,7 +118,7 @@ class World {
             tries++
             val x = rf(-190f, 190f)
             val z = rf(-190f, 190f)
-            if (houses.any { hypot(it.cx - x, it.cz - z) < 12f }) continue
+            if (spots.any { hypot(it[0] - x, it[1] - z) < 14f }) continue
             addPalm(x, z)
             made++
         }
@@ -107,45 +127,176 @@ class World {
         }
     }
 
+    // ---------------------------------------------------------------- building
+
+    /**
+     * Multi-story building: n floors + walkable roof with parapet.
+     * Doors on north and south walls (ground floor). Stairs alternate between the
+     * west column (going south) and the east column (going north), landing on each floor.
+     */
+    private fun addBuilding(cx: Float, cz: Float, w: Float, d: Float, n: Int, tone: Float) {
+        val t = 0.3f
+        val x0 = cx - w / 2
+        val x1 = cx + w / 2
+        val z0 = cz - d / 2
+        val z1 = cz + d / 2
+        val xi0 = x0 + t
+        val xi1 = x1 - t
+        val zi0 = z0 + t
+        val zi1 = z1 - t
+        val b = Building(x0 - 0.2f, x1 + 0.2f, z0 - 0.2f, z1 + 0.2f)
+        buildings.add(b)
+
+        val wr = 0.80f + 0.10f * tone
+        val wg = 0.66f + 0.08f * tone
+        val wb = 0.45f + 0.06f * tone
+
+        fun solid(
+            ax0: Float, ax1: Float, az0: Float, az1: Float, yb: Float, yt: Float,
+            r: Float, g: Float, bl: Float, closed: Boolean = false
+        ) {
+            if (ax1 - ax0 < 0.01f || az1 - az0 < 0.01f) return
+            b.solids.add(Solid(ax0, ax1, az0, az1, yb, yt))
+            mesh.box((ax0 + ax1) / 2, yb, (az0 + az1) / 2, ax1 - ax0, yt - yb, az1 - az0, r, g, bl, closed)
+        }
+
+        fun deco(
+            ax0: Float, ax1: Float, az0: Float, az1: Float, yb: Float, yt: Float,
+            r: Float, g: Float, bl: Float
+        ) {
+            mesh.box((ax0 + ax1) / 2, yb, (az0 + az1) / 2, ax1 - ax0, yt - yb, az1 - az0, r, g, bl)
+        }
+
+        // interior floor (ground level)
+        deco(xi0, xi1, zi0, zi1, 0f, 0.04f, 0.55f, 0.45f, 0.33f)
+
+        // ---- walls ----
+        val doorX0 = cx - 0.9f
+        val doorX1 = cx + 0.9f
+        val doorH = 2.6f
+        for (k in 0 until n) {
+            val yb = k * FH
+            val yt = yb + FH
+            solid(x0, x0 + t, z0, z1, yb, yt, wr, wg, wb)       // west
+            solid(x1 - t, x1, z0, z1, yb, yt, wr, wg, wb)       // east
+            for (side in 0..1) {                                 // 0 = north, 1 = south
+                val za = if (side == 0) z0 else z1 - t
+                val zb = za + t
+                if (k == 0) {
+                    solid(xi0, doorX0, za, zb, yb, yt, wr, wg, wb)
+                    solid(doorX1, xi1, za, zb, yb, yt, wr, wg, wb)
+                    solid(doorX0, doorX1, za, zb, yb + doorH, yt, wr, wg, wb)   // lintel
+                } else {
+                    solid(xi0, xi1, za, zb, yb, yt, wr, wg, wb)
+                }
+                val wz = if (side == 0) z0 - 0.04f else z1 - 0.02f
+                val xs = if (k == 0) floatArrayOf(cx - w / 4, cx + w / 4)
+                else floatArrayOf(cx - w / 3, cx, cx + w / 3)
+                for (xw in xs) {
+                    deco(xw - 0.6f, xw + 0.6f, wz, wz + 0.06f, yb + 1.3f, yb + 2.3f, 0.15f, 0.20f, 0.28f)
+                }
+            }
+        }
+
+        // ---- roof parapet ----
+        val ry = n * FH
+        val ph = 0.9f
+        solid(x0, x0 + t, z0, z1, ry, ry + ph, wr * 0.9f, wg * 0.9f, wb * 0.9f)
+        solid(x1 - t, x1, z0, z1, ry, ry + ph, wr * 0.9f, wg * 0.9f, wb * 0.9f)
+        solid(xi0, xi1, z0, z0 + t, ry, ry + ph, wr * 0.9f, wg * 0.9f, wb * 0.9f)
+        solid(xi0, xi1, z1 - t, z1, ry, ry + ph, wr * 0.9f, wg * 0.9f, wb * 0.9f)
+
+        // ---- floor slabs (with stairwell holes) ----
+        val sw = 1.6f        // stair width
+        val land = 1.5f      // landing before the first step
+        val ns = 10          // steps per flight
+        val sh = FH / ns     // step height
+        val tr = 0.45f       // step tread
+        val len = ns * tr    // flight length
+
+        fun slab(ax0: Float, ax1: Float, az0: Float, az1: Float, top: Float) {
+            if (ax1 - ax0 < 0.01f || az1 - az0 < 0.01f) return
+            solid(ax0, ax1, az0, az1, top - 0.3f, top, wr * 0.8f, wg * 0.78f, wb * 0.75f, true)
+            b.surfs.add(Surf(ax0, ax1, az0, az1, top))
+        }
+
+        for (j in 1..n) {
+            val top = j * FH
+            val f = j - 1                       // flight that passes through this slab
+            if (f % 2 == 0) {                   // west column, ascending south
+                val hz0 = zi0 + land
+                val hz1 = hz0 + len
+                val cxm = xi0 + sw
+                slab(xi0, cxm, zi0, hz0, top)
+                slab(cxm, xi1, zi0, zi1, top)
+                slab(xi0, cxm, hz1, zi1, top)
+            } else {                            // east column, ascending north
+                val hz1 = zi1 - land
+                val hz0 = hz1 - len
+                val cxm = xi1 - sw
+                slab(cxm, xi1, zi0, hz0, top)
+                slab(xi0, cxm, zi0, zi1, top)
+                slab(cxm, xi1, hz1, zi1, top)
+            }
+        }
+
+        // ---- stairs ----
+        for (i in 0 until n) {
+            val base = i * FH
+            for (s in 0 until ns) {
+                val top = base + (s + 1) * sh
+                if (i % 2 == 0) {
+                    val za = zi0 + land + s * tr
+                    solid(xi0, xi0 + sw, za, za + tr, base, top, 0.62f, 0.52f, 0.38f)
+                    b.surfs.add(Surf(xi0, xi0 + sw, za, za + tr, top))
+                } else {
+                    val zb = zi1 - land - s * tr
+                    solid(xi1 - sw, xi1, zb - tr, zb, base, top, 0.62f, 0.52f, 0.38f)
+                    b.surfs.add(Surf(xi1 - sw, xi1, zb - tr, zb, top))
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- physics
+
     fun heightAt(x: Float, z: Float): Float {
         var h = 0f
-        for (b in bumps) {
-            val dx = x - b[0]
-            val dz = z - b[1]
+        for (bm in bumps) {
+            val dx = x - bm[0]
+            val dz = z - bm[1]
             val d2 = dx * dx + dz * dz
-            val r2 = b[2] * b[2]
+            val r2 = bm[2] * bm[2]
             if (d2 < r2) {
                 val t = 1f - d2 / r2
-                h += b[3] * t * t
+                h += bm[3] * t * t
             }
         }
         return h
     }
 
-    /** Push a circle (p[0]=x, p[1]=z, radius r) out of houses, palms and world bounds. */
-    fun resolve(p: FloatArray, r: Float) {
-        for (b in boxes) {
-            val cx = p[0].coerceIn(b.x0, b.x1)
-            val cz = p[1].coerceIn(b.z0, b.z1)
-            val dx = p[0] - cx
-            val dz = p[1] - cz
-            val d2 = dx * dx + dz * dz
-            if (d2 < r * r) {
-                if (d2 > 1e-6f) {
-                    val d = sqrt(d2)
-                    p[0] = cx + dx / d * r
-                    p[1] = cz + dz / d * r
-                } else {
-                    val l = p[0] - b.x0
-                    val rr = b.x1 - p[0]
-                    val t = p[1] - b.z0
-                    val bt = b.z1 - p[1]
-                    val m = minOf(minOf(l, rr), minOf(t, bt))
-                    if (m == l) p[0] = b.x0 - r
-                    else if (m == rr) p[0] = b.x1 + r
-                    else if (m == t) p[1] = b.z0 - r
-                    else p[1] = b.z1 + r
-                }
+    /** Highest walkable surface at (x, z) that the player at feetY can stand on / step onto. */
+    fun surfaceY(x: Float, z: Float, feetY: Float): Float {
+        var best = heightAt(x, z)
+        for (b in buildings) {
+            if (x < b.x0 || x > b.x1 || z < b.z0 || z > b.z1) continue
+            for (s in b.surfs) {
+                if (s.top > best && s.top <= feetY + STEP_UP &&
+                    x >= s.x0 && x <= s.x1 && z >= s.z0 && z <= s.z1
+                ) best = s.top
+            }
+        }
+        return best
+    }
+
+    /** Push a circle (p[0]=x, p[1]=z, radius r) out of solids, palms and world bounds. */
+    fun resolve(p: FloatArray, r: Float, feetY: Float) {
+        for (b in buildings) {
+            if (p[0] < b.x0 - r || p[0] > b.x1 + r || p[1] < b.z0 - r || p[1] > b.z1 + r) continue
+            for (s in b.solids) {
+                if (feetY + STEP_UP >= s.yt) continue
+                if (feetY + PLAYER_H <= s.yb) continue
+                pushOut(p, r, s.x0, s.x1, s.z0, s.z1)
             }
         }
         for (c in circles) {
@@ -168,17 +319,51 @@ class World {
         p[1] = p[1].coerceIn(-lim, lim)
     }
 
+    private fun pushOut(p: FloatArray, r: Float, bx0: Float, bx1: Float, bz0: Float, bz1: Float) {
+        val cx = p[0].coerceIn(bx0, bx1)
+        val cz = p[1].coerceIn(bz0, bz1)
+        val dx = p[0] - cx
+        val dz = p[1] - cz
+        val d2 = dx * dx + dz * dz
+        if (d2 >= r * r) return
+        if (d2 > 1e-6f) {
+            val d = sqrt(d2)
+            p[0] = cx + dx / d * r
+            p[1] = cz + dz / d * r
+        } else {
+            val l = p[0] - bx0
+            val rr = bx1 - p[0]
+            val t = p[1] - bz0
+            val bt = bz1 - p[1]
+            val m = minOf(minOf(l, rr), minOf(t, bt))
+            if (m == l) p[0] = bx0 - r
+            else if (m == rr) p[0] = bx1 + r
+            else if (m == t) p[1] = bz0 - r
+            else p[1] = bz1 + r
+        }
+    }
+
+    /** True if a camera at this point would be inside the ground or a building solid. */
+    fun cameraBlocked(x: Float, y: Float, z: Float): Boolean {
+        if (y < heightAt(x, z) + 0.25f) return true
+        for (b in buildings) {
+            if (x < b.x0 || x > b.x1 || z < b.z0 || z > b.z1) continue
+            for (s in b.solids) {
+                if (x >= s.x0 && x <= s.x1 && z >= s.z0 && z <= s.z1 && y >= s.yb && y <= s.yt) return true
+            }
+        }
+        return false
+    }
+
     // ------------------------------------------------------------------ mesh
 
     fun buildMesh(): MeshBuilder {
-        val mb = MeshBuilder()
-        buildGround(mb)
-        for (h in houses) buildHouse(mb, h)
-        for (p in palms) buildPalm(mb, p[0], p[1])
+        buildGround(mesh)
+        for (p in palms) buildPalm(mesh, p[0], p[1])
         for (r in rocks) {
-            mb.cone(r[0], heightAt(r[0], r[1]) - 0.3f, r[1], r[2], r[2] * 0.8f, 5, 0.45f, 0.42f, 0.38f)
+            mesh.cone(r[0], heightAt(r[0], r[1]) - 0.3f, r[1], r[2], r[2] * 0.8f, 5, 0.45f, 0.42f, 0.38f)
         }
-        return mb
+        return mesh
     }
 
     private fun buildGround(mb: MeshBuilder) {
@@ -208,19 +393,6 @@ class World {
     private fun hash(x: Float, z: Float): Float {
         val s = sin(x * 12.9898f + z * 78.233f) * 43758.5453f
         return s - floor(s)
-    }
-
-    private fun buildHouse(mb: MeshBuilder, h: House) {
-        val t = h.tone
-        val wr = 0.80f + 0.10f * t
-        val wg = 0.66f + 0.08f * t
-        val wb = 0.45f + 0.06f * t
-        mb.box(h.cx, 0f, h.cz, h.w, h.h, h.d, wr, wg, wb)                                  // walls
-        mb.box(h.cx, h.h, h.cz, h.w + 0.6f, 0.4f, h.d + 0.6f, wr * 0.75f, wg * 0.70f, wb * 0.65f) // roof
-        val fz = h.cz + h.d / 2 + 0.05f
-        mb.box(h.cx, 0f, fz, 1.6f, 2.5f, 0.12f, 0.35f, 0.22f, 0.12f)                       // door
-        mb.box(h.cx - h.w / 4, 1.6f, fz, 1.2f, 1.0f, 0.12f, 0.15f, 0.20f, 0.28f)           // windows
-        mb.box(h.cx + h.w / 4, 1.6f, fz, 1.2f, 1.0f, 0.12f, 0.15f, 0.20f, 0.28f)
     }
 
     private fun buildPalm(mb: MeshBuilder, x: Float, z: Float) {

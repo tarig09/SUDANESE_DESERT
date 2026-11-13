@@ -38,8 +38,8 @@ class MeshBuilder {
         v(x3, y3, z3, nx, ny, nz, r, g, b)
     }
 
-    /** Box centered on (cx, cz), sitting on y = by. No bottom face. */
-    fun box(cx: Float, by: Float, cz: Float, sx: Float, sy: Float, sz: Float, r: Float, g: Float, b: Float) {
+    /** Box centered on (cx, cz), sitting on y = by. Bottom face only if closed. */
+    fun box(cx: Float, by: Float, cz: Float, sx: Float, sy: Float, sz: Float, r: Float, g: Float, b: Float, closed: Boolean = false) {
         val x0 = cx - sx / 2; val x1 = cx + sx / 2
         val y0 = by; val y1 = by + sy
         val z0 = cz - sz / 2; val z1 = cz + sz / 2
@@ -48,6 +48,7 @@ class MeshBuilder {
         quad(x0, y0, z0, x0, y1, z0, x0, y1, z1, x0, y0, z1, -1f, 0f, 0f, r, g, b)
         quad(x0, y0, z1, x0, y1, z1, x1, y1, z1, x1, y0, z1, 0f, 0f, 1f, r, g, b)
         quad(x0, y0, z0, x0, y1, z0, x1, y1, z0, x1, y0, z0, 0f, 0f, -1f, r, g, b)
+        if (closed) quad(x0, y0, z0, x1, y0, z0, x1, y0, z1, x0, y0, z1, 0f, -1f, 0f, r, g, b)
     }
 
     /** Open cone (no base), apex up. */

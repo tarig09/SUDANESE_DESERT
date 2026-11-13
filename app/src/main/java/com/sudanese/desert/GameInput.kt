@@ -5,6 +5,7 @@ class GameInput {
     @Volatile var moveX = 0f   // right = +
     @Volatile var moveY = 0f   // forward = +
     @Volatile var jump = false
+    @Volatile var toggleCam = false
 
     private var lx = 0f
     private var ly = 0f

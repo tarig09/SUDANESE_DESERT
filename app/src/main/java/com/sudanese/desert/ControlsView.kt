@@ -25,6 +25,9 @@ class ControlsView(context: Context, private val input: GameInput) : View(contex
     private var lastY = 0f
     private var jx = 0f
     private var jy = 0f
+    private var camX = 0f
+    private var camY = 0f
+    private val camR = 28f * d
 
     private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -44,6 +47,8 @@ class ControlsView(context: Context, private val input: GameInput) : View(contex
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         jx = w - 100f * d
         jy = h - 90f * d
+        camX = w - 60f * d
+        camY = 50f * d
     }
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
@@ -53,7 +58,9 @@ class ControlsView(context: Context, private val input: GameInput) : View(contex
                 val id = e.getPointerId(i)
                 val x = e.getX(i)
                 val y = e.getY(i)
-                if (jumpId == -1 && hypot(x - jx, y - jy) <= jr * 1.4f) {
+                if (hypot(x - camX, y - camY) <= camR * 1.3f) {
+                    input.toggleCam = true
+                } else if (jumpId == -1 && hypot(x - jx, y - jy) <= jr * 1.4f) {
                     jumpId = id
                     input.jump = true
                 } else if (x < width / 2f) {
@@ -123,5 +130,15 @@ class ControlsView(context: Context, private val input: GameInput) : View(contex
         c.drawCircle(jx, jy, jr, fill)
         c.drawCircle(jx, jy, jr, ring)
         c.drawText("قفز", jx, jy + 5f * d, label)
+
+        c.drawCircle(camX, camY, camR, fill)
+        c.drawCircle(camX, camY, camR, ring)
+        c.drawText("كاميرا", camX, camY + 5f * d, label)
+
+        // crosshair
+        val cx = width / 2f
+        val cy = height / 2f
+        c.drawCircle(cx, cy, 2.5f * d, fill)
+        c.drawCircle(cx, cy, 5f * d, ring)
     }
 }
