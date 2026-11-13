@@ -1,5 +1,6 @@
 package com.sudanese.desert
 
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.floor
 import kotlin.math.hypot
@@ -32,8 +33,16 @@ class World {
         const val PLAYER_H = 1.7f
     }
 
+    /** Pickup. kind: 0..3 = weapons (see Guns), 4 = ammo, 5 = medkit, 6 = shield. */
+    class Item(val kind: Int, val x: Float, val y: Float, val z: Float) {
+        var alive = true
+    }
+
     val buildings = ArrayList<Building>()
     val circles = ArrayList<Circle>()
+    val lootSpots = ArrayList<FloatArray>()   // x, y, z of loot positions inside buildings
+    val items = ArrayList<Item>()
+    val dummySpawns = ArrayList<FloatArray>()   // x, y, z, yaw
     private val spots = ArrayList<FloatArray>()   // building centers: cx, cz
     private val bumps = ArrayList<FloatArray>()   // x, z, radius, height
     private val palms = ArrayList<FloatArray>()   // x, z
@@ -85,7 +94,7 @@ class World {
                     r < 0.90f -> 4
                     else -> 5
                 }
-                spots.add(floatArrayOf(hx, hz))
+                spots.add(floatArrayOf(hx, hz, floors.toFloat(), w, d))
                 addBuilding(hx, hz, w, d, floors, rf(0f, 1f))
                 placed++
             }
@@ -125,6 +134,59 @@ class World {
         for (i in 0 until 70) {
             rocks.add(floatArrayOf(rf(-190f, 190f), rf(-190f, 190f), rf(0.8f, 2.2f)))
         }
+
+        generateLoot()
+    }
+
+    private fun pickWeaponKind(): Int {
+        val r = rnd.nextFloat()
+        return when {
+            r < 0.25f -> 0
+            r < 0.60f -> 1
+            r < 0.75f -> 2
+            else -> 3
+        }
+    }
+
+    private fun generateLoot() {
+        // inside buildings: one weapon + one supply item, on random floors (n = roof)
+        for (s in spots) {
+            val n = s[2].toInt()
+            for (i in 0 until 2) {
+                val k = rnd.nextInt(n + 1)
+                val x = s[0] + rf(-1.5f, 1.5f)
+                val z = s[1] + rf(-2.5f, 2.5f)
+                val y = k * FH + (if (k == 0) 0.04f else 0f)
+                val kind = if (i == 0) pickWeaponKind() else 4 + rnd.nextInt(3)
+                items.add(Item(kind, x, y, z))
+            }
+        }
+        // outdoors
+        var made = 0
+        var tries = 0
+        while (made < 30 && tries < 200) {
+            tries++
+            val x = rf(-185f, 185f)
+            val z = rf(-185f, 185f)
+            if (spots.any { hypot(it[0] - x, it[1] - z) < 14f }) continue
+            val kind = if (rnd.nextFloat() < 0.4f) pickWeaponKind() else 4 + rnd.nextInt(3)
+            items.add(Item(kind, x, heightAt(x, z), z))
+            made++
+        }
+        // training dummies near the spawn point
+        val near = arrayOf(
+            floatArrayOf(10f, -14f), floatArrayOf(-12f, -20f), floatArrayOf(18f, -26f),
+            floatArrayOf(0f, -34f), floatArrayOf(-20f, -8f)
+        )
+        for (p in near) dummySpawns.add(floatArrayOf(p[0], heightAt(p[0], p[1]), p[1], rf(0f, 360f)))
+        // dummies inside some buildings
+        for ((idx, s) in spots.withIndex()) {
+            if (idx % 3 != 0) continue
+            val n = s[2].toInt()
+            val k = rnd.nextInt(n)
+            val y = k * FH + (if (k == 0) 0.04f else 0f)
+            dummySpawns.add(floatArrayOf(s[0] + rf(-1f, 1f), y, s[1] + rf(-2f, 2f), rf(0f, 360f)))
+        }
     }
 
     // ---------------------------------------------------------------- building
@@ -146,6 +208,13 @@ class World {
         val zi1 = z1 - t
         val b = Building(x0 - 0.2f, x1 + 0.2f, z0 - 0.2f, z1 + 0.2f)
         buildings.add(b)
+
+        // loot on every level (ground, floors, roof), near the middle of the building
+        for (lv in 0..n) {
+            if (rnd.nextFloat() < 0.7f) {
+                lootSpots.add(floatArrayOf(cx + rf(-1.2f, 1.2f), lv * FH, cz + rf(-1.5f, 1.5f)))
+            }
+        }
 
         val wr = 0.80f + 0.10f * tone
         val wg = 0.66f + 0.08f * tone
@@ -275,6 +344,35 @@ class World {
         return h
     }
 
+    /** Distance along the ray to the first static obstacle (ground, walls, floors, palm trunks), or maxD. */
+    fun raycast(ox: Float, oy: Float, oz: Float, dx: Float, dy: Float, dz: Float, maxD: Float): Float {
+        var t = 0.3f
+        val step = 0.25f
+        while (t < maxD) {
+            if (bulletBlocked(ox + dx * t, oy + dy * t, oz + dz * t)) return t
+            t += step
+        }
+        return maxD
+    }
+
+    private fun bulletBlocked(x: Float, y: Float, z: Float): Boolean {
+        val gh = heightAt(x, z)
+        if (y < gh) return true
+        if (y > 80f) return false
+        for (b in buildings) {
+            if (x < b.x0 || x > b.x1 || z < b.z0 || z > b.z1) continue
+            for (s in b.solids) {
+                if (x >= s.x0 && x <= s.x1 && z >= s.z0 && z <= s.z1 && y >= s.yb && y <= s.yt) return true
+            }
+        }
+        for (c in circles) {
+            val dx = x - c.x
+            val dz = z - c.z
+            if (abs(dx) < 0.3f && abs(dz) < 0.3f && y < gh + 6.2f) return true
+        }
+        return false
+    }
+
     /** Highest walkable surface at (x, z) that the player at feetY can stand on / step onto. */
     fun surfaceY(x: Float, z: Float, feetY: Float): Float {
         var best = heightAt(x, z)
@@ -353,6 +451,31 @@ class World {
             }
         }
         return false
+    }
+
+    /** Distance along the ray to the first static hit (ground, building solid, palm) or maxDist. */
+    fun rayStatic(ox: Float, oy: Float, oz: Float, dx: Float, dy: Float, dz: Float, maxDist: Float): Float {
+        var t = 0.3f
+        while (t < maxDist) {
+            val x = ox + dx * t
+            val y = oy + dy * t
+            val z = oz + dz * t
+            if (x < -HALF || x > HALF || z < -HALF || z > HALF) return t
+            if (y < heightAt(x, z)) return t
+            for (b in buildings) {
+                if (x < b.x0 || x > b.x1 || z < b.z0 || z > b.z1) continue
+                for (s in b.solids) {
+                    if (x >= s.x0 && x <= s.x1 && z >= s.z0 && z <= s.z1 && y >= s.yb && y <= s.yt) return t
+                }
+            }
+            for (c in circles) {
+                val ddx = x - c.x
+                val ddz = z - c.z
+                if (ddx * ddx + ddz * ddz < 0.2f && y < heightAt(c.x, c.z) + 6f) return t
+            }
+            t += 0.25f
+        }
+        return maxDist
     }
 
     // ------------------------------------------------------------------ mesh

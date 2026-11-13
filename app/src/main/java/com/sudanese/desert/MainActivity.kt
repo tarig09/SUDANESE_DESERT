@@ -13,6 +13,7 @@ import android.widget.TextView
 
 class MainActivity : Activity() {
     private lateinit var glView: GLSurfaceView
+    private lateinit var sfx: SoundFx
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -27,7 +28,8 @@ class MainActivity : Activity() {
             setShadowLayer(3f, 0f, 0f, Color.BLACK)
         }
 
-        val renderer = GameRenderer(input) { fps ->
+        sfx = SoundFx(applicationContext)
+        val renderer = GameRenderer(input, sfx) { fps ->
             fpsText.post { fpsText.text = "FPS $fps" }
         }
 
@@ -77,5 +79,10 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         glView.onResume()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        sfx.release()
     }
 }

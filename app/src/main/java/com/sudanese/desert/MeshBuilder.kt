@@ -4,6 +4,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -65,6 +66,55 @@ class MeshBuilder {
             v(cx + cos(a1) * radius, by, cz + sin(a1) * radius, nx, ny, nz, r, g, b)
             v(cx, by + height, cz, nx, ny, nz, r, g, b)
         }
+    }
+
+    fun clear() {
+        n = 0
+    }
+
+    /** Copies vertices into a reusable buffer (truncating if too big). Returns vertex count. */
+    fun fill(fb: FloatBuffer): Int {
+        fb.clear()
+        val cap = (fb.capacity() / 9) * 9
+        val m = if (n > cap) cap else n
+        fb.put(a, 0, m)
+        fb.position(0)
+        return m / 9
+    }
+
+    /** Thin camera-agnostic ribbon (two crossed quads) between two points. */
+    fun ribbon(
+        x0: Float, y0: Float, z0: Float, x1: Float, y1: Float, z1: Float,
+        h: Float, r: Float, g: Float, b: Float
+    ) {
+        var dx = x1 - x0
+        var dy = y1 - y0
+        var dz = z1 - z0
+        val len = sqrt(dx * dx + dy * dy + dz * dz)
+        if (len < 1e-4f) return
+        dx /= len; dy /= len; dz /= len
+        val rx: Float
+        val ry: Float
+        val rz: Float
+        if (abs(dy) < 0.9f) { rx = 0f; ry = 1f; rz = 0f } else { rx = 1f; ry = 0f; rz = 0f }
+        var sx = dy * rz - dz * ry
+        var sy = dz * rx - dx * rz
+        var sz = dx * ry - dy * rx
+        val sl = sqrt(sx * sx + sy * sy + sz * sz)
+        sx /= sl; sy /= sl; sz /= sl
+        val ux = dy * sz - dz * sy
+        val uy = dz * sx - dx * sz
+        val uz = dx * sy - dy * sx
+        quad(
+            x0 + sx * h, y0 + sy * h, z0 + sz * h, x0 - sx * h, y0 - sy * h, z0 - sz * h,
+            x1 - sx * h, y1 - sy * h, z1 - sz * h, x1 + sx * h, y1 + sy * h, z1 + sz * h,
+            ux, uy, uz, r, g, b
+        )
+        quad(
+            x0 + ux * h, y0 + uy * h, z0 + uz * h, x0 - ux * h, y0 - uy * h, z0 - uz * h,
+            x1 - ux * h, y1 - uy * h, z1 - uz * h, x1 + ux * h, y1 + uy * h, z1 + uz * h,
+            sx, sy, sz, r, g, b
+        )
     }
 
     fun toBuffer(): FloatBuffer {
