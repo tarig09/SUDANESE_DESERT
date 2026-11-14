@@ -29,7 +29,7 @@ class MainActivity : Activity() {
         }
 
         sfx = SoundFx(applicationContext)
-        val renderer = GameRenderer(input, sfx) { fps ->
+        val renderer = GameRenderer(input, sfx, assets) { fps ->
             fpsText.post { fpsText.text = "FPS $fps" }
         }
 

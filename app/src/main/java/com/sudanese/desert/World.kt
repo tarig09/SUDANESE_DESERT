@@ -40,6 +40,7 @@ class World {
 
     val buildings = ArrayList<Building>()
     val circles = ArrayList<Circle>()
+    val villageCenters = ArrayList<FloatArray>()
     val lootSpots = ArrayList<FloatArray>()   // x, y, z of loot positions inside buildings
     val items = ArrayList<Item>()
     val dummySpawns = ArrayList<FloatArray>()   // x, y, z, yaw
@@ -55,6 +56,8 @@ class World {
     init {
         generate()
     }
+
+    fun nearBuilding(x: Float, z: Float, r: Float): Boolean = spots.any { hypot(it[0] - x, it[1] - z) < r }
 
     private fun addPalm(x: Float, z: Float) {
         palms.add(floatArrayOf(x, z))
@@ -73,6 +76,7 @@ class World {
             if (centers.any { hypot(it[0] - x, it[1] - z) < 80f }) continue
             centers.add(floatArrayOf(x, z))
         }
+        villageCenters.addAll(centers)
         for (c in centers) {
             val count = 5 + rnd.nextInt(4)
             var placed = 0

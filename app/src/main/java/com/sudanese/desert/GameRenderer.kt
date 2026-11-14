@@ -1,5 +1,6 @@
 package com.sudanese.desert
 
+import android.content.res.AssetManager
 import android.opengl.GLES20
 import android.opengl.GLES30
 import android.opengl.GLSurfaceView
@@ -39,9 +40,14 @@ private class Fx(val x: Float, val y: Float, val z: Float, val r: Float, val g: 
     var life = 0.25f
 }
 
+private class PropInst(
+    val idx: Int, val x: Float, val y: Float, val z: Float, val yaw: Float, val scale: Float
+)
+
 class GameRenderer(
     private val input: GameInput,
     private val sfx: SoundFx,
+    private val assets: AssetManager,
     private val onFps: (Int) -> Unit
 ) : GLSurfaceView.Renderer {
 
@@ -54,6 +60,7 @@ class GameRenderer(
         private const val GRAVITY = 20f
         private const val CAM_DIST = 3.8f   // third-person camera distance
         private const val DYN_VERTS = 3000
+        private const val MODEL_YAW = 180f   // external characters face +Z; set to 0f if they appear backwards
 
         // part indices inside the parts buffer
         private const val P_BODY = 0
@@ -111,6 +118,11 @@ void main() {
 
     private val world = World()
     private val rng = Random(99)
+    private val models = ModelSystem(assets)
+    private var charAnim: Animator? = null
+    private val dummyAnims = ArrayList<Animator>()
+    private val props = ArrayList<PropInst>()
+    private var animT = 0f
 
     // ---- player
     private var px = 0f
@@ -391,6 +403,9 @@ void main() {
         setupAttribs()
         GLES30.glBindVertexArray(0)
 
+        models.init()
+        setupModels()
+
         lastNs = System.nanoTime()
     }
 
@@ -481,6 +496,7 @@ void main() {
         swing += (target - swing) * minOf(1f, dt * 15f)
 
         computeCamera()
+        updateAnims(dt)
         updateWeapons(dt)
         updatePickups()
         updateDummies(dt)
@@ -850,21 +866,175 @@ void main() {
         GLES20.glUniform3f(uFog, FOG_R, FOG_G, FOG_B)
         GLES20.glUniform3f(uTint, 1f, 1f, 1f)
 
+        val useChar = models.ready && models.character != null && charAnim != null
+
         // world
         GLES20.glUniformMatrix4fv(uModel, 1, false, ident, 0)
         GLES30.glBindVertexArray(vao)
         GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, vertexCount)
 
-        // parts-based objects
+        // built-in box models (used when no external model is available)
         GLES30.glBindVertexArray(partsVao)
         drawPickups()
-        drawDummies()
-        if (showChar) drawCharacter()
+        if (!useChar) drawDummies()
+        if (showChar && !useChar) drawCharacter()
+        if (showChar && useChar && cur >= 0 && models.guns[cur] == null) drawGunProcedural()
         GLES20.glUniform3f(uTint, 1f, 1f, 1f)
 
         // dynamic effects
         drawDynamic()
         GLES30.glBindVertexArray(0)
+
+        // external 3D models
+        if (models.ready) drawModels(useChar)
+    }
+
+    private fun setupModels() {
+        charAnim = null
+        dummyAnims.clear()
+        if (!models.ready) {
+            if (models.status.isNotEmpty()) say(models.status)
+            return
+        }
+        val cm = models.character?.data
+        if (cm != null) {
+            charAnim = Animator(cm)
+            for (i in dummies.indices) dummyAnims.add(Animator(cm))
+        }
+        if (props.isEmpty()) placeProps()
+        say(models.status)
+        msgT = 6f
+    }
+
+    private fun placeProps() {
+        val r = Random(555)
+        for (mi in models.propInfo.indices) {
+            val info = models.propInfo[mi]
+            var placed = 0
+            var tries = 0
+            while (placed < info.count && tries < info.count * 30) {
+                tries++
+                val x: Float
+                val z: Float
+                if (r.nextFloat() < 0.6f && world.villageCenters.isNotEmpty()) {
+                    val c = world.villageCenters[r.nextInt(world.villageCenters.size)]
+                    val a = r.nextFloat() * 6.2831f
+                    val d = 8f + r.nextFloat() * 40f
+                    x = c[0] + cos(a) * d
+                    z = c[1] + sin(a) * d
+                } else {
+                    x = (r.nextFloat() * 2f - 1f) * 185f
+                    z = (r.nextFloat() * 2f - 1f) * 185f
+                }
+                if (abs(x) > 190f || abs(z) > 190f) continue
+                if (world.nearBuilding(x, z, 13f)) continue
+                if (hypot(x - spawnX, z - spawnZ) < 10f) continue
+                val sc = 0.85f + r.nextFloat() * 0.3f
+                props.add(PropInst(mi, x, world.heightAt(x, z), z, r.nextFloat() * 360f, sc))
+                if (info.radius > 0f) world.circles.add(World.Circle(x, z, info.radius * sc))
+                placed++
+            }
+        }
+    }
+
+    private fun updateAnims(dt: Float) {
+        val a = charAnim ?: return
+        val moving = onGround && hypot(input.moveX, input.moveY) > 0.1f
+        animT += dt * (if (moving) 1.6f else 1f)
+        a.reset()
+        val clip = models.clipFor(moving, cur)
+        if (clip != null) a.sample(clip, animT)
+        a.update()
+
+        val idle = models.idleClip()
+        for (i in dummyAnims.indices) {
+            val dm = dummies[i]
+            if (!dm.alive) continue
+            val dx = px - dm.x
+            val dz = pz - dm.z
+            if (dx * dx + dz * dz > 90f * 90f) continue
+            val an = dummyAnims[i]
+            an.reset()
+            if (idle != null) an.sample(idle, animT + i * 0.37f)
+            an.update()
+        }
+    }
+
+    private fun gunBase(m: FloatArray) {
+        Matrix.setIdentityM(m, 0)
+        Matrix.translateM(m, 0, px, feetY + 1.25f, pz)
+        Matrix.rotateM(m, 0, -yaw, 0f, 1f, 0f)
+        Matrix.rotateM(m, 0, pitch, 1f, 0f, 0f)
+        Matrix.translateM(m, 0, 0.30f, 0f, -0.25f)
+    }
+
+    private fun drawModels(useChar: Boolean) {
+        models.begin(vp, camX, camY, camZ, 0.4165f, 0.8329f, 0.3644f, FOG_R, FOG_G, FOG_B)
+
+        // props
+        for (p in props) {
+            val dx = px - p.x
+            val dz = pz - p.z
+            if (dx * dx + dz * dz > 100f * 100f) continue
+            if (p.idx >= models.props.size) continue
+            Matrix.setIdentityM(m3, 0)
+            Matrix.translateM(m3, 0, p.x, p.y, p.z)
+            Matrix.rotateM(m3, 0, p.yaw, 0f, 1f, 0f)
+            Matrix.scaleM(m3, 0, p.scale, p.scale, p.scale)
+            models.draw(models.props[p.idx], m3, 1f, 1f, 1f, null)
+        }
+
+        // character models (player + dummies)
+        val cm = models.character
+        if (useChar && cm != null) {
+            for (i in dummies.indices) {
+                val dm = dummies[i]
+                if (!dm.alive || i >= dummyAnims.size) continue
+                val ddx = px - dm.x
+                val ddz = pz - dm.z
+                if (ddx * ddx + ddz * ddz > 90f * 90f) continue
+                val ang = Math.toDegrees(atan2(ddx.toDouble(), -ddz.toDouble())).toFloat()
+                Matrix.setIdentityM(m1, 0)
+                Matrix.translateM(m1, 0, dm.x, dm.y, dm.z)
+                Matrix.rotateM(m1, 0, -ang + MODEL_YAW, 0f, 1f, 0f)
+                if (dm.flash > 0f) models.draw(cm, m1, 1.8f, 1.2f, 1.2f, dummyAnims[i])
+                else models.draw(cm, m1, 1f, 0.55f, 0.5f, dummyAnims[i])
+            }
+            val pa = charAnim
+            if (showChar && pa != null) {
+                Matrix.setIdentityM(m1, 0)
+                Matrix.translateM(m1, 0, px, feetY, pz)
+                Matrix.rotateM(m1, 0, -yaw + MODEL_YAW, 0f, 1f, 0f)
+                models.draw(cm, m1, 1f, 1f, 1f, pa)
+            }
+        }
+
+        // held gun
+        if (showChar && cur >= 0) {
+            val g = models.guns[cur]
+            if (g != null) {
+                gunBase(m3)
+                models.draw(g, m3, 1f, 1f, 1f, null)
+            }
+        }
+
+        // gun pickups
+        for (p in pickups) {
+            if (!p.alive || p.type >= 4) continue
+            val g = models.guns[p.type] ?: continue
+            val dx = px - p.x
+            val dz = pz - p.z
+            if (dx * dx + dz * dz > 70f * 70f) continue
+            Matrix.setIdentityM(m3, 0)
+            Matrix.translateM(m3, 0, p.x, p.y + 0.55f + 0.08f * sin(gameTime * 2f + p.x), p.z)
+            Matrix.rotateM(m3, 0, gameTime * 90f, 0f, 1f, 0f)
+            Matrix.scaleM(m3, 0, 1.4f, 1.4f, 1.4f)
+            Matrix.translateM(m3, 0, 0f, 0f, 0.4f)
+            models.draw(g, m3, 1f, 1f, 1f, null)
+        }
+
+        models.end()
+        GLES20.glUseProgram(program)
     }
 
     private fun drawPart(m: FloatArray, idx: Int) {
@@ -891,18 +1061,16 @@ void main() {
         if (cur >= 0) {
             limb(m1, -0.34f, 1.42f, 70f + pitch, P_ARM)
             limb(m1, 0.34f, 1.42f, 80f + pitch, P_ARM)
-
-            // gun in hand
-            Matrix.setIdentityM(m3, 0)
-            Matrix.translateM(m3, 0, px, feetY + 1.25f, pz)
-            Matrix.rotateM(m3, 0, -yaw, 0f, 1f, 0f)
-            Matrix.rotateM(m3, 0, pitch, 1f, 0f, 0f)
-            Matrix.translateM(m3, 0, 0.30f, 0f, -0.25f)
-            drawPart(m3, P_GUN + cur)
+            if (models.guns[cur] == null) drawGunProcedural()
         } else {
             limb(m1, -0.34f, 1.42f, -swing, P_ARM)
             limb(m1, 0.34f, 1.42f, swing, P_ARM)
         }
+    }
+
+    private fun drawGunProcedural() {
+        gunBase(m3)
+        drawPart(m3, P_GUN + cur)
     }
 
     private fun drawDummies() {
@@ -929,6 +1097,7 @@ void main() {
     private fun drawPickups() {
         for (p in pickups) {
             if (!p.alive) continue
+            if (p.type < 4 && models.ready && models.guns[p.type] != null) continue
             val dx = px - p.x
             val dz = pz - p.z
             if (dx * dx + dz * dz > 70f * 70f) continue
